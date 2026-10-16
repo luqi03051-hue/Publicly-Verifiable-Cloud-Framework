@@ -1,0 +1,38 @@
+# Generated cryptographic material (do not commit)
+keys/
+**/keys/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+.aws/
+**/.aws/
+*credentials*
+
+# Bundled AWS CLI distribution
+/aws/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# IDE and OS
+.vscode/
+.idea/
+.vs/
+.DS_Store
+Thumbs.db
+*.log
