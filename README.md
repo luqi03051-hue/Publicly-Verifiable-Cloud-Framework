@@ -4,218 +4,226 @@
 
 **Python · AWS Lambda · Docker · Charm-Crypto · PBC · AES-256-GCM · Amazon S3**
 
-> **Research proof of concept — not a production-ready security service.** This repository explores how a pairing-based, publicly verifiable, revocable attribute-based encryption scheme can be implemented in a serverless cloud workflow. Its engineering extensions and tests should not be confused with the formal security proofs in the research paper.
+> **Research proof of concept, not a production security service.** This repository explores how the PV-SR-ABE scheme from the accompanying research paper can be adapted to a cloud-based hybrid-encryption workflow. The paper's security proofs do not automatically establish the security of every engineering extension.
 
-## The problem: can you trust outsourced decryption?
+## Why does this matter?
 
-Imagine an organisation storing confidential documents in the cloud. Access should depend on a user's attributes (such as `Department: Engineering` and `Project: Alpha`), and access must be revocable when an employee leaves or their credentials are compromised.
+Imagine a company storing confidential documents in the cloud. Only employees with appropriate attributes (for example, `Engineering` **and** `Project-Alpha`) should decrypt them. If an employee leaves, their access should be revoked. To reduce client computation, the company asks a cloud server to perform expensive pairing-based transformations—but **how can anyone tell whether that server returned a correct result?**
 
-**Attribute-Based Encryption (ABE)** enforces fine-grained access policies cryptographically. **Revocable ABE (RABE)** adds a way to prevent revoked users from obtaining valid transformation keys for new time periods. Because pairing-based operations can be expensive for clients, a cloud server can perform most of the decryption-related computation on their behalf.
+Traditional verifiable outsourcing may require an authorised user to decrypt before checking the result. **PV-SR-ABE makes verification public and moves it before decryption.**
 
-But the cloud server may be untrusted. How can a user—or an independent auditor—know that its outsourced computation is correct **before** attempting decryption?
+## Before and after: who can verify?
 
-This project investigates that question through **Public Verifiable Server-Aided Revocable ABE (PV-SR-ABE)**.
-
-## The idea: verify first, decrypt second
-
-In many verifiable outsourced-decryption approaches, only a legitimate user can check a result, often after decryption. PV-SR-ABE separates **public verification** from **private message recovery**:
-
-```text
-Conventional private verification:
-  Untrusted server → Outsourced result → User decrypts → User checks
-
-PV-SR-ABE:
-  Untrusted server → Transformed result (π) → Anyone verifies → Authorised user decrypts
+```mermaid
+flowchart LR
+    subgraph OLD[Conventional private verification]
+      direction LR
+      A[Untrusted server] --> B[User decrypts] --> C[User verifies]
+    end
+    subgraph NEW[PV-SR-ABE]
+      direction LR
+      D[Untrusted server] --> E[Anyone verifies] --> F[Authorised user decrypts]
+    end
+    style OLD fill:#fff1f1,stroke:#e8b8b8,color:#6d2929
+    style NEW fill:#eefaf3,stroke:#a9d8bd,color:#205b39
 ```
 
-A public verifier uses public parameters, the ciphertext, and a **user-specific public verification key** (`vk_ID`) to check the transformation. The verifier does **not** need the user's private decryption key or the plaintext. Only an authorised, non-revoked user satisfying the access policy can complete decryption.
+*Conceptual comparison: public verification checks the outsourced transformation; it does not grant the verifier access to the plaintext.*
 
-The underlying research construction also uses a user-specific random value in the transformation, rather than a single static verification result shared by every user.
+## Example: sharing a confidential project file
 
-## Example: confidential document sharing
+*Illustrative application, not a deployed enterprise case study.*
 
-Consider an illustrative company sharing a sensitive engineering report:
+1. The **Trusted Authority (PKG)** generates public parameters and issues user keys linked to identities and attributes.
+2. The **data owner** encrypts a file under an access policy and a time period.
+3. The **cloud server** performs the eligible user's outsourced transformation using time-update material.
+4. An **independent public verifier** checks the transformed result with public verification information—without the user's secret key.
+5. Only an **authorised, non-revoked user** completes decryption locally.
 
-1. A **Private Key Generator (PKG)** establishes the system and issues attribute-linked user credentials.
-2. A **data owner** encrypts the report under a policy such as `Engineering AND Project-Alpha`, with a designated time period.
-3. The encrypted data is stored in the cloud. A cloud service derives a transformation key using the relevant time-update material and computes an outsourced result for an eligible user.
-4. **Any independent auditor** can verify the published transformed result without knowing the user's private key.
-5. The **authorised user** verifies the result and performs the final local decryption.
-6. If the user is **revoked**, the key-update mechanism prevents them from deriving a valid transformation key for the applicable subsequent periods.
-
-*This is an application scenario illustrating the scheme, not a claim of a deployed enterprise product.*
-
-## System architecture
-
-![PV-SR-ABE system architecture](architecture/system_architecture.png)
-
-The prototype separates local authority operations, cloud processing, and public auditing:
-
-| Component | Responsibility |
-|---|---|
-| **PKG (local / trusted)** | `Setup`, `UserKG`, `TKeyUp`, `Revoke`; manages master secrets and user credentials |
-| **Data owner** | Encrypts data under an attribute policy and time period |
-| **AWS Lambda (cloud / untrusted computation)** | Processes encryption and transformation requests in a container with native pairing libraries |
-| **Amazon S3 / local simulation** | Stores encrypted bundles, configuration, published verification records, and audit data |
-| **Public verifier** | Checks outsourced results using publicly available information |
-| **Data user** | Holds a private decryption key and recovers plaintext locally after verification |
-
-The `crypto/lambda_service.py` implementation handles S3-style `inbox/` encryption events and `requests/` transformation events. It can publish transformed results and append outcomes to a hash-chained audit log. The standalone `crypto/public_verify.py` supports individual-record verification and log-monitoring workflows. These are **prototype features**, not an independent guarantee that every cloud configuration is tamper-proof.
-
-## What is implemented?
-
-The research paper defines **nine algorithms**:
-
-| Algorithm | Purpose |
-|---|---|
-| `Setup` | Generate public parameters and master secret material |
-| `UserKG` | Issue user decryption, verification, and long-term transformation keys |
-| `TKeyUp` | Produce time-period update material for non-revoked users |
-| `TranKG` | Derive a user's short-term transformation key, or fail |
-| `Encrypt` | Encrypt under an access policy and time period |
-| `Transform` | Outsource policy-dependent pairing computation |
-| `Verify` | Publicly validate the transformed result |
-| `Decrypt` | Recover the protected message with the user's private key |
-| `Revoke` | Update the revocation state |
-
-The repository includes a pairing-based implementation of these operations in `crypto/pv_core.py`, command-line utilities, AWS Lambda integration, and test scripts. **Theoretical correctness/security claims belong to the paper; code-level assurance depends on tests, configuration, and further review.**
-
-### Hybrid encryption for real files
-
-The paper's ABE construction operates on pairing-group elements. To handle arbitrary file contents, the prototype uses a hybrid design:
-
-```text
-Data owner:
-  Random GT session element ──> key derivation ──> AES-256-GCM key
-           │                                         │
-           └── PV-SR-ABE encryption                  └── Encrypt file bytes
-                      │                                         │
-                      └──────────── Stored ciphertext bundle ──┘
-
-Data user:
-  Verify transformed ABE result → Recover session element
-       → Derive AES key → AES-256-GCM decrypt → Plaintext
+```mermaid
+flowchart LR
+    O[Data owner] -->|Encrypt with access policy| S[(Encrypted cloud storage)]
+    S --> L[Cloud transformation]
+    L -->|Result + verification data| V[Public verifier]
+    V -->|If valid| U[Authorised user]
+    U --> P[Local plaintext recovery]
+    style O fill:#eaf3ff,stroke:#a8c9ef
+    style S fill:#eaf8f0,stroke:#a8d7bb
+    style L fill:#fff3e8,stroke:#edc39e
+    style V fill:#f3edff,stroke:#cbb7eb
+    style U fill:#eaf3ff,stroke:#a8c9ef
 ```
 
-This is an **engineering adaptation** of the paper's group-element message construction. Its security as a combined hybrid system should be analysed separately rather than assumed solely from the paper's IND-sCPA result.
+## What this repository actually implements
+
+The project contains a **pairing-based research prototype**, local command-line tools, an AWS Lambda container workflow, storage adapters, public verification utilities, and tests. The Lambda workflow uses S3-style requests and responses; local object storage supports development and demonstrations.
+
+### System architecture
+
+```mermaid
+flowchart TB
+    PKG["Trusted Authority / PKG<br/>Setup · UserKG · TKeyUp · Revoke"]
+    OWNER["Data owner<br/>Choose policy and encrypt"]
+    CLOUD["AWS Lambda + Docker<br/>Cloud-side encryption / transformation"]
+    STORE[("Amazon S3 / local object store<br/>Encrypted bundles and records")]
+    VERIFY["Public verifier<br/>Check transformed result"]
+    USER["Data user<br/>Verify, decrypt and recover file"]
+
+    PKG -->|Public parameters and update material| CLOUD
+    PKG -->|Private credentials delivered securely| USER
+    OWNER -->|Encryption request| CLOUD
+    CLOUD <--> STORE
+    CLOUD -->|Transformed result| VERIFY
+    VERIFY -->|Verification outcome| USER
+    STORE -->|Encrypted bundle| USER
+
+    style PKG fill:#eaf3ff,stroke:#a8c9ef
+    style OWNER fill:#eaf8f0,stroke:#a8d7bb
+    style CLOUD fill:#fff3e8,stroke:#edc39e
+    style STORE fill:#eaf8f0,stroke:#a8d7bb
+    style VERIFY fill:#f3edff,stroke:#cbb7eb
+    style USER fill:#eaf3ff,stroke:#a8c9ef
+```
+
+*Trust boundary: the master secret stays with the trusted authority; public verification does not require private decryption keys. The diagram is a simplified conceptual view of the repository's workflows.*
+
+### Hybrid encryption: ABE protects the key, AES protects the file
+
+The paper describes encryption over pairing-group elements. This prototype adapts the design for ordinary file bytes: a random group element is used to derive an AES-256-GCM data-encryption key (DEK), and PV-SR-ABE protects the group element.
+
+```mermaid
+flowchart LR
+    FILE[Plaintext file] --> AES[AES-256-GCM]
+    KEY[Random group session element] --> KDF[Derive DEK]
+    KDF --> AES
+    KEY --> ABE[PV-SR-ABE encryption]
+    AES --> BUNDLE[(Encrypted bundle)]
+    ABE --> BUNDLE
+    BUNDLE --> CHECK[Transform + public Verify]
+    CHECK --> RECOVER[Authorised user recovers DEK]
+    RECOVER --> DEC[AES-GCM decryption]
+    DEC --> OUT[Plaintext file]
+    style BUNDLE fill:#eaf8f0,stroke:#a8d7bb
+    style CHECK fill:#f3edff,stroke:#cbb7eb
+```
+
+**Important:** the combined hybrid construction is an engineering adaptation; its security must be evaluated separately from the paper's IND-sCPA proof.
+
+## Three core security features
+
+| Feature | What it means |
+|---|---|
+| **Public verifiability** | A third party can check an outsourced transformation using public verification information, without the user's decryption key. |
+| **Verify-then-decrypt** | Incorrect outsourced results can be rejected before local plaintext recovery. |
+| **User revocation** | A binary-tree-based update mechanism prevents revoked users from obtaining valid transformation keys for applicable later periods. |
+
+### How revocation works
+
+```mermaid
+flowchart LR
+    T["Period t<br/>Eligible user"] --> R["PKG revokes user<br/>and issues next update"] --> NEXT["Period t+1<br/>Revoked user cannot derive<br/>a valid new transformation key"]
+    style T fill:#eaf3ff,stroke:#a8c9ef
+    style R fill:#fff3e8,stroke:#edc39e
+    style NEXT fill:#fff1f1,stroke:#e8b8b8
+```
+
+*Revocation is time-based: it does not retroactively erase plaintext or keys previously obtained by a user.*
+
+## Research scheme vs. prototype
+
+The paper defines nine algorithms: `Setup`, `UserKG`, `TKeyUp`, `TranKG`, `Encrypt`, `Transform`, `Verify`, `Decrypt`, and `Revoke`. The prototype implements corresponding operations in `crypto/pv_core.py` and related utilities. The paper studies **selective IND-CPA security in a one-user revocation setting** and **selective public verifiability**; these are theoretical claims about the specified construction, not a certification of the deployed software.
 
 ## Technology stack
 
-| Technology | Role |
+| Component | Technology |
 |---|---|
-| **Python** | Cryptographic workflow, CLIs, verification and tests |
-| **Charm-Crypto + PBC + GMP** | Bilinear pairing operations and big-integer arithmetic |
-| **AES-256-GCM** | Authenticated encryption of file contents |
-| **Docker** | Packages native dependencies for a Linux runtime |
-| **AWS Lambda** | Event-driven cloud processing via a container image |
-| **Amazon S3** | Cloud object storage and request/record exchange |
-| **Ed25519** | Signing selected public directory/parameter information in the publication workflow |
-| **pytest** | Test scenarios for encryption, policy failure and time mismatch |
+| Core cryptography | Python, Charm-Crypto, PBC, GMP |
+| File encryption | AES-256-GCM via `cryptography` |
+| Cloud processing | AWS Lambda, Docker container image |
+| Object storage | Amazon S3 / local object store |
+| Tests | pytest |
 
-## Repository guide
+## Project structure
 
 ```text
 .
-├── architecture/
-│   └── system_architecture.png
-├── crypto/
-│   ├── pv_core.py              # Core PV-SR-ABE algorithms
-│   ├── ta_local.py             # PKG setup, user keys, updates, revocation
-│   ├── lambda_encrypt.py       # Hybrid encryption CLI
-│   ├── client_decrypt.py       # Local verification/decryption path
-│   ├── lambda_service.py       # S3-triggered cloud workflow
-│   ├── public_verify.py        # Independent public verification
-│   ├── client_request.py       # Request/response workflow
-│   ├── export_public.py        # Public parameters and signed directory
-│   ├── pv_publish.py           # Publication and audit helpers
-│   └── pv_store.py             # Local and S3 storage adapters
-├── docker/
-│   └── Dockerfile
-├── docs/
-│   ├── algorithm_overview.md
-│   ├── deployment.md
-│   ├── security_model.md
-│   └── PUBLIC_VERIFICATION.md
-├── example/
-├── tests/
-├── paper/
+├── architecture/             # Original detailed architecture diagram
+├── crypto/                   # PV-SR-ABE core, CLI and cloud integration
+│   ├── pv_core.py
+│   ├── ta_local.py
+│   ├── lambda_encrypt.py
+│   ├── client_decrypt.py
+│   ├── lambda_service.py
+│   ├── public_verify.py
+│   └── ...
+├── docker/                   # AWS Lambda container Dockerfile
+├── docs/                     # Algorithm, security and deployment notes
+├── example/                  # Demonstration scripts
+├── paper/                    # Research material (if redistribution permitted)
+├── tests/                    # End-to-end and failure-case tests
 ├── requirements.txt
 ├── requirements-dev.txt
 └── README.md
 ```
 
-## Getting started
+## Try the local proof of concept
 
-**Prerequisites:** Docker, or a compatible Python environment with Charm-Crypto, PBC and GMP already installed. Pairing dependencies are native libraries; `pip install -r requirements.txt` alone may not provide a working environment on Windows.
+**Prerequisites:** a working Python environment with Charm-Crypto, PBC and GMP (or a compatible Docker image). Installing `requirements.txt` alone may not install native pairing dependencies, particularly on Windows.
 
-The Dockerfile is under `docker/`, and the Lambda container configuration may require AWS-specific settings. Start with the detailed [deployment guide](docs/deployment.md) and [public-verification workflow](docs/PUBLIC_VERIFICATION.md).
-
-For the original local CLI demonstration, the Python entry points live in `crypto/`. After installing the required dependencies, run commands from that directory:
+From the repository root:
 
 ```bash
 cd crypto
 
-# Initialise local authority state (contains secret material)
+# Initialise trusted authority (contains secret material)
 python ta_local.py setup --curve SS512 --depth 4 --out keys/pv_setup.json
 
-# Issue a user credential
+# Issue credentials to an eligible user
 python ta_local.py userkg --setup keys/pv_setup.json \
   --id alice@example.com --attrs "A,C" --out keys/alice_user.json
 
-# Encrypt a sample message
+# Encrypt a sample message; save the printed object ID
 python lambda_encrypt.py --setup keys/pv_setup.json \
   --policy "(A and C)" --t 1 \
   --plaintext "confidential record" --store_dir keys/store
 
-# Issue a time-update key
+# Issue a time-period update
 python ta_local.py tkeyup --setup keys/pv_setup.json \
   --t 1 --out keys/tuk_t1.json
-```
 
-The encryption command prints an object identifier. Use that value in the next step:
-
-```bash
+# Replace OBJECT_ID with the identifier printed by the encryption command
 python client_decrypt.py --setup keys/pv_setup.json \
   --user keys/alice_user.json --tuk keys/tuk_t1.json \
-  --object_id YOUR_OBJECT_ID --store_dir keys/store
+  --object_id OBJECT_ID --store_dir keys/store
 ```
 
-These commands illustrate the intended CLI workflow; they have **not been re-executed as part of preparing this README**. Use test data only. Never commit generated `keys/` material.
+The expected successful path is **Transform → Verify → Decrypt**. See [deployment instructions](docs/deployment.md) for the cloud setup and [public-verification documentation](docs/PUBLIC_VERIFICATION.md) for the auditing workflow.
 
-## Testing and validation
+## Tests and validation
 
-The repository includes tests intended to cover:
+The repository includes test cases for the normal encryption/decryption path, an unsatisfied access policy, and a mismatched time period.
 
-| Test | Scenario | Intended outcome |
-|---|---|---|
-| `tests/test_e2e_ok.py` | Eligible user, matching policy and time | Successful verification and plaintext recovery |
-| `tests/test_policy_fail.py` | Attributes do not satisfy the policy | Access/decryption rejected |
-| `tests/test_time_fail.py` | Update period differs from ciphertext period | Transformation or verification fails |
-| `crypto/tests/test_service_local.py` | Local cloud-service simulation | Exercises the service workflow |
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
 
-The top-level test scripts refer to CLI files by path and may need adjustment for the current `crypto/` directory layout. **Do not interpret their presence as proof that the test suite passes unchanged on a fresh checkout.** Test outcomes and cloud benchmarks should be reported only after running them in a documented environment.
+These commands assume the pairing dependencies are already available. **Test outcomes have not been independently re-run for this README**, and passing prototype tests does not replace a security audit.
 
-## Security model and limitations
+## Security notes and limitations
 
-The accompanying paper analyses **selective IND-CPA security in a one-user revocation setting** and **selective public verifiability** based on a Verifiable Delegable Computation model. Those are formal claims about the paper's specified construction and assumptions—not an audit of this AWS prototype.
-
-Important deployment considerations:
-
-- **Master secrets stay with the PKG.** Do not place `msk`, generated private keys, or signing secrets in S3 public objects, container images, or Git history.
-- **Public verification is not public decryption.** Auditors can validate transformed results but cannot recover plaintext without an authorised user's decryption key.
-- **Revocation is time-based.** Its effect depends on correct key-update distribution and enforcement of time-period matching; it does not automatically erase previously obtained plaintext.
-- **The prototype uses research-oriented pairing parameters.** Do not assume modern production security levels or post-quantum resistance.
-- **Cloud controls still matter.** IAM, bucket policies, secure transport, logging integrity, authentication, key rotation and error handling require independent hardening.
-- **The hybrid KEM/DEM integration and operational protocol** need their own security analysis and review before production use.
+- **Never commit** generated master secrets, user private keys, `keys/`, `.env`, or AWS credentials. Review Git's staged files before pushing.
+- The trusted authority remains responsible for master secrets, identity enrolment, and revocation.
+- The prototype's pairing configuration is intended for research and should not be assumed to meet modern production or post-quantum security requirements.
+- Cloud identity/access management, authenticated communication, key lifecycle controls, logging integrity and operational hardening require additional work before production use.
+- A public verification result establishes correctness only within the scheme's assumptions and the implementation's actual behaviour.
 
 ## Research background
 
-**Luqi Huang, Fuchun Guo, Willy Susilo, and Yumei Li.** *Public Verifiable Server-Aided Revocable Attribute-Based Encryption.* Research manuscript included in [`paper/`](paper/).
+Based on **“Public Verifiable Server-Aided Revocable Attribute-Based Encryption”** by **Luqi Huang, Fuchun Guo, Willy Susilo and Yumei Li** (research manuscript supplied with this project).
 
-The paper introduces public verification of untrusted outsourced computation, a **verify-then-decrypt** approach, and user-specific transformed results within a revocable ABE design. It presents formal security models and proofs for the specified construction.
-
-For technical details, see [Algorithm Overview](docs/algorithm_overview.md), [Security Model](docs/security_model.md), and the [research manuscript](paper/).
+The paper introduces public verification of outsourced results, a verify-then-decrypt mechanism, user-specific transformations, and revocation through time-period key updates. This repository explores how those ideas can be represented in a practical, cloud-oriented prototype.
 
 ---
 
-*From cryptographic research to a testable cloud-security prototype: exploring accountable outsourced computation without giving the cloud the user's private decryption key.*
+*Research in verifiable cryptography, translated into an inspectable cloud-security prototype.*
